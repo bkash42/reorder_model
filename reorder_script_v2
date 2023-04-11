@@ -1,0 +1,58 @@
+# -*- coding: utf-8 -*-
+"""
+To be used with Saved Search: 'Reorder Model Excel'
+"""
+
+import pandas as pd
+from pandas import ExcelWriter
+import numpy as np
+
+# Import CSV
+df = pd.read_csv('Reorder.csv')
+
+# Convert columns to numeric values to be used in calculations
+cols_to_convert = ['Quantity Available', 'On Order', 'In Transit Qty', 'SKU Backlog', 'Child Backlog', 'Build Point', 'Preferred Stock Level', 'Reorder Multiple', 'MOQ', 'Vendor Price']
+for col in cols_to_convert:
+    df[col] = pd.to_numeric(df[col], errors='coerce')                     
+
+# Calculate if the product needs to be ordered, TRUE if yes, FALSE if no
+df['Need to Order'] = df['Quantity Available'] + df['On Order'] + df['In Transit Qty'] - df['SKU Backlog'] - df['Child Backlog'] < df['Build Point']
+
+# Calculate Current Stock Level
+df['Current Stock Level'] = df['Quantity Available'] + df['On Order'] + df['In Transit Qty'] - df['SKU Backlog'] - df['Child Backlog']
+
+# Calculate the order quantity
+df['Order Quantity'] = np.ceil(df['Preferred Stock Level'] - (df['Quantity Available'] + df['On Order'] + df['In Transit Qty'] - df['SKU Backlog'] - df['Child Backlog']))
+
+# Round up to the nearest multiple of the reorder multiple
+df['Order Quantity'] = (df['Order Quantity'] + df['Reorder Multiple'] - 1) // df['Reorder Multiple'] * df['Reorder Multiple']
+
+# Apply the minimum order quantity
+df.loc[df['Order Quantity'] < df['MOQ'], 'Order Quantity'] = df['MOQ']
+
+# Calculate Subtotal (Order Qty * Vendor Price)
+df['Order Subtotal'] = df['Order Quantity'] * df['Vendor Price']
+
+# Remove items that do not need to be ordered, and items that need to be ordered in specific pallet qtys from main reorder output
+df_to_order = df[(df['Need to Order'] == True) & (df['Count Pallets?'] == 0)]
+
+# Sort df_to_order by Vendor and Order Subtotal
+df_to_order = df_to_order.sort_values(by=['Vendor','Order Subtotal'], ascending=[True, False])
+
+# Split out SKUs that requires ordering in a specified amount of pallets
+df_palletize = df[df['Count Pallets?'] == 1]
+
+# Calculate amount of pallets on order
+df_palletize['# of Pallets'] = df_palletize['Order Quantity'] / df_palletize['Reorder Multiple']
+
+# Output Excel
+
+list_dfs = [df_to_order, df_palletize]
+sheet_names = ['To Order', 'Polycarbonate']
+
+def save_xls(list_dfs, xls_path, sheet_names):
+    with ExcelWriter(xls_path) as writer:
+        for df, sheet_name in zip(list_dfs, sheet_names):
+            df.to_excel(writer, sheet_name)
+            
+save_xls(list_dfs, 'order.xlsx', sheet_names)
