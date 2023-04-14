@@ -72,6 +72,7 @@ for col in cols_to_convert:
 # Bring Child Backlog into Main Order Screen
 Order_Final = pd.merge(df, Child_Consumption_Final[['Component','RM_Units']], left_on='SKU', right_on='Component', how='left')
 Order_Final = Order_Final.drop('Component', axis=1)         
+Order_Final['RM_Units'] = Order_Final['RM_Units'].fillna(0)
 
 # Calculate if the product needs to be ordered, TRUE if yes, FALSE if no
 Order_Final['Need to Order'] = Order_Final['Quantity Available'] + Order_Final['On Order'] + Order_Final['In Transit Qty'] - Order_Final['SKU Backlog'] - Order_Final['RM_Units'] < Order_Final['Build Point']
