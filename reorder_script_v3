@@ -1,0 +1,129 @@
+# -*- coding: utf-8 -*-
+"""
+
+"""
+
+import pandas as pd
+from pandas import ExcelWriter
+import numpy as np
+
+# Import CSVs
+df = pd.read_csv('Reorder.csv')
+BOMdf = pd.read_csv('BOM_Components.csv')
+Cdf = pd.read_csv('ConvertedSKUInventory.csv')
+
+
+
+
+
+
+
+# Calculating Child Consumption:
+
+# Convert columns to numeric values to be used in calculations
+cols_to_convert = ['Available', 'On Order', 'In Transit', 'Backlog', 'Build Point', 'Preferred Stock Level']
+for col in cols_to_convert:
+    Cdf[col] = pd.to_numeric(Cdf[col], errors='coerce')
+    
+# Calculate if the product needs to be ordered, TRUE if yes, FALSE if no
+Cdf['Need to Build'] = Cdf['Available'] + Cdf['On Order'] + Cdf['In Transit'] - Cdf['Backlog'] < Cdf['Build Point']
+
+# Calculate the order quantity
+Cdf['Build Quantity'] = np.ceil(Cdf['Preferred Stock Level'] - (Cdf['Available'] + Cdf['On Order'] + Cdf['In Transit'] - Cdf['Backlog']))
+
+ # Remove items that do not need to be built
+Cdf = Cdf[(Cdf['Need to Build'] == True)]
+
+
+# Bring in Build Qty from Cdf
+
+Child_Consumption = pd.merge(BOMdf, Cdf[['Name', 'Build Quantity']], on='Name')
+
+# Split Child_Consumption by Item Source
+
+From_Stock = Child_Consumption[(Child_Consumption['Item Source'] == 'Stock') | (Child_Consumption['Item Source'] == 'STOCK')]
+From_WO = Child_Consumption[(Child_Consumption['Item Source'] == 'WORK_ORDER')]
+
+# Calculate Component Qty Required for Builds in WO df and sum up total units required by parent
+
+From_WO['Component_Units'] = From_WO['Build Quantity'] * From_WO['BoM Quantity']
+From_WO = From_WO.rename(columns={'Component': 'Sub-Component', 'Component_Units': 'Sub-Component_Units'})
+From_WO = From_WO.groupby('Sub-Component')['Sub-Component_Units'].sum().reset_index()
+
+
+Child_Consumption_Final = pd.merge(From_Stock, From_WO[['Sub-Component','Sub-Component_Units']], left_on='Name', right_on='Sub-Component', how='left')
+Child_Consumption_Final['Sub-Component_Units'] = Child_Consumption_Final['Sub-Component_Units'].fillna(0)
+Child_Consumption_Final['Combined_Units'] = Child_Consumption_Final['Sub-Component_Units'] + Child_Consumption_Final['Build Quantity']
+Child_Consumption_Final['RM_Units'] = Child_Consumption_Final['Combined_Units'] * Child_Consumption_Final['BoM Quantity']
+Child_Consumption_Final = Child_Consumption_Final.groupby('Component')['RM_Units'].sum().reset_index()
+
+
+
+# Main Reorder Screen
+
+
+
+
+# Convert columns to numeric values to be used in calculations
+cols_to_convert = ['Quantity Available', 'On Order', 'In Transit Qty', 'SKU Backlog', 'Child Backlog', 'Build Point', 'Preferred Stock Level', 'Reorder Multiple', 'MOQ', 'Vendor Price']
+for col in cols_to_convert:
+    df[col] = pd.to_numeric(df[col], errors='coerce')          
+
+# Bring Child Backlog into Main Order Screen
+Order_Final = pd.merge(df, Child_Consumption_Final[['Component','RM_Units']], left_on='SKU', right_on='Component', how='left')
+Order_Final = Order_Final.drop('Component', axis=1)         
+
+# Calculate if the product needs to be ordered, TRUE if yes, FALSE if no
+Order_Final['Need to Order'] = Order_Final['Quantity Available'] + Order_Final['On Order'] + Order_Final['In Transit Qty'] - Order_Final['SKU Backlog'] - Order_Final['RM_Units'] < Order_Final['Build Point']
+
+# Calculate Current Stock Level
+Order_Final['Current Stock Level'] = Order_Final['Quantity Available'] + Order_Final['On Order'] + Order_Final['In Transit Qty'] - Order_Final['SKU Backlog'] - Order_Final['RM_Units']
+
+# Calculate the order quantity
+Order_Final['Order Quantity'] = np.ceil(Order_Final['Preferred Stock Level'] - (Order_Final['Quantity Available'] + Order_Final['On Order'] + Order_Final['In Transit Qty'] - Order_Final['SKU Backlog'] - Order_Final['RM_Units']))
+
+# Round up to the nearest multiple of the reorder multiple
+Order_Final['Order Quantity'] = (Order_Final['Order Quantity'] + Order_Final['Reorder Multiple'] - 1) // Order_Final['Reorder Multiple'] * Order_Final['Reorder Multiple']
+
+# Apply the minimum order quantity
+Order_Final.loc[Order_Final['Order Quantity'] < Order_Final['MOQ'], 'Order Quantity'] = Order_Final['MOQ']
+
+# Calculate Subtotal (Order Qty * Vendor Price)
+Order_Final['Order Subtotal'] = Order_Final['Order Quantity'] * Order_Final['Vendor Price']
+Order_Final = Order_Final.rename(columns={'RM_Units': 'Pending Child Consumption'})
+
+# Remove items that do not need to be ordered, and items that need to be ordered in specific pallet qtys from main reorder output
+df_to_order = Order_Final[(Order_Final['Need to Order'] == True) & (Order_Final['Count Pallets?'] == 0)]
+df_to_order = df_to_order.drop(['Need to Order','Count Pallets?'], axis=1)
+
+# Sort df_to_order by Vendor and Order Subtotal
+df_to_order = df_to_order.sort_values(by=['Vendor','Order Subtotal'], ascending=[True, False])
+
+# Split out SKUs that requires ordering in a specified amount of pallets
+df_palletize = Order_Final[Order_Final['Count Pallets?'] == 1]
+
+# Calculate amount of pallets on order
+df_palletize['# of Pallets'] = df_palletize['Order Quantity'] / df_palletize['Reorder Multiple']
+
+
+
+
+
+
+
+
+
+
+
+
+# Output Excel
+
+list_dfs = [df_to_order, df_palletize, Order_Final]
+sheet_names = ['To Order', 'Polycarbonate','Order_Final']
+
+def save_xls(list_dfs, xls_path, sheet_names):
+    with ExcelWriter(xls_path) as writer:
+        for df, sheet_name in zip(list_dfs, sheet_names):
+            df.to_excel(writer, sheet_name, index=False)
+            
+save_xls(list_dfs, 'order.xlsx', sheet_names)
